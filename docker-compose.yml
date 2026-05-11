@@ -1,0 +1,41 @@
+services:
+  app:
+    build: .
+    command: python -m earth_pulse.server_entry
+    ports:
+      - "8000:8000"
+    volumes:
+      - earth_pulse_data:/app/data
+    environment:
+      - OPENAI__API_KEY=${OPENAI__API_KEY}
+      - SERVER__API_KEY=${SERVER__API_KEY}
+      - DATABASE__URL=sqlite:////app/data/earth_pulse.db
+    depends_on:
+      - worker
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "python", "-c", "import http.client; c=http.client.HTTPConnection('localhost',8000,timeout=5); c.request('GET','/health'); r=c.getresponse(); exit(0 if r.status==200 else 1)"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  worker:
+    build: .
+    command: python -m earth_pulse.worker
+    volumes:
+      - earth_pulse_data:/app/data
+    environment:
+      - OPENAI__API_KEY=${OPENAI__API_KEY}
+      - DATABASE__URL=sqlite:////app/data/earth_pulse.db
+      - INGESTION__POLL_INTERVAL_MINUTES=${INGESTION__POLL_INTERVAL_MINUTES:-15}
+    restart: unless-stopped
+
+  tunnel:
+    image: cloudflare/cloudflared:latest
+    command: tunnel --no-autoupdate --url http://app:8000
+    depends_on:
+      - app
+    restart: unless-stopped
+
+volumes:
+  earth_pulse_data:

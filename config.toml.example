@@ -1,0 +1,22 @@
+[openai]
+api_key = "sk-your-openai-api-key-here"
+chat_model = "gpt-5.4"
+embedding_model = "text-embedding-3-large"
+
+[server]
+api_key = "your-mcp-api-key-here"
+host = "0.0.0.0"
+port = 8000
+
+[ingestion]
+poll_interval_minutes = 15
+
+[database]
+url = "sqlite:///earth_pulse.db"
+
+[sources.bbc_rss]
+enabled = true
+
+[sources.bbc_unofficial]
+enabled = true
+# minimum poll floor: 30 minutes, regardless of poll_interval_minutes

@@ -1,5 +1,7 @@
 # Earth Pulse
 
+> ⚠️ **Not production ready yet.** This project is under active development. Expect breaking changes.
+
 **An AI that observes humanity in real time.**
 
 Earth Pulse is not a news reader. It is a planetary intelligence system that continuously ingests BBC News, enriches every article with GPT, and exposes the synthesized understanding of the world through an MCP server that any AI assistant can connect to.

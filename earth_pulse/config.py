@@ -67,9 +67,27 @@ def _env(key: str, default: str | None = None) -> str | None:
 
 
 def load_settings(config_path: Path | None = None) -> Settings:
-    """Load settings from config.toml, overridden by environment variables."""
+    """Load settings from config.toml, overridden by environment variables.
+
+    Config file search order (first existing file wins):
+      1. Explicit config_path argument
+      2. EARTH_PULSE_CONFIG env var
+      3. ./config.toml  (local dev)
+      4. /config/config.toml  (Kubernetes ConfigMap mount)
+
+    Environment variables always override file values.
+    """
     if config_path is None:
-        config_path = Path("config.toml")
+        env_path = os.environ.get("EARTH_PULSE_CONFIG")
+        candidates = [
+            Path(env_path) if env_path else None,
+            Path("config.toml"),
+            Path("/config/config.toml"),
+        ]
+        config_path = next(
+            (p for p in candidates if p is not None and p.exists()),
+            Path("config.toml"),  # fallback — may not exist, env vars take over
+        )
 
     raw: dict = {}
     if config_path.exists():

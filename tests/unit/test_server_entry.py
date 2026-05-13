@@ -18,7 +18,7 @@ from earth_pulse.config import (
 def _make_settings() -> Settings:
     return Settings(
         openai=OpenAISettings(api_key="sk-test", chat_model="gpt-test"),
-        server=ServerSettings(api_key="srv-key", host="127.0.0.1", port=9999),
+        server=ServerSettings(host="127.0.0.1", port=9999),
         ingestion=IngestionSettings(poll_interval_minutes=15),
         database=DatabaseSettings(url="sqlite:///:memory:"),
         sources=SourcesSettings(

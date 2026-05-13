@@ -22,7 +22,7 @@ from earth_pulse.observability import JSONLoggingAdapter
 def settings() -> Settings:
     return Settings(
         openai=OpenAISettings(api_key="test-key", chat_model="gpt-test"),
-        server=ServerSettings(api_key="test-server-key"),
+        server=ServerSettings(),
         ingestion=IngestionSettings(poll_interval_minutes=15),
         database=DatabaseSettings(url="sqlite:///:memory:"),
         sources=SourcesSettings(

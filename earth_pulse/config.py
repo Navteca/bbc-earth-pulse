@@ -1,7 +1,7 @@
 """
 Typed settings loaded from config.toml via tomllib.
 Environment variables override config values using double-underscore notation:
-  OPENAI__API_KEY, SERVER__API_KEY, etc.
+  OPENAI__API_KEY, etc.
 App fails fast at startup if required fields are missing.
 """
 
@@ -22,7 +22,6 @@ class OpenAISettings:
 
 @dataclass
 class ServerSettings:
-    api_key: str
     host: str = "0.0.0.0"
     port: int = 8000
 
@@ -115,9 +114,7 @@ def load_settings(config_path: Path | None = None) -> Settings:
 
     # --- server ---
     server_raw = raw.get("server", {})
-    server_api_key = _env("SERVER__API_KEY") or server_raw.get("api_key", "")
     server_settings = ServerSettings(
-        api_key=server_api_key,
         host=_env("SERVER__HOST") or server_raw.get("host", "0.0.0.0"),
         port=int(_env("SERVER__PORT") or server_raw.get("port", 8000)),
     )

@@ -73,7 +73,7 @@ def full_db():
 def full_settings():
     return Settings(
         openai=OpenAISettings(api_key="sk-test", chat_model="gpt-test"),
-        server=ServerSettings(api_key="integration-key"),
+        server=ServerSettings(),
         ingestion=IngestionSettings(poll_interval_minutes=15),
         database=DatabaseSettings(url="sqlite:///:memory:"),
         sources=SourcesSettings(

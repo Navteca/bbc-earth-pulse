@@ -57,6 +57,9 @@ class DatabasePort(ABC):
         limit: int = 200,
     ) -> list[tuple[Article, Enrichment]]: ...
 
+    @abstractmethod
+    def get_articles_by_ids(self, ids: list[str]) -> list[Article]: ...
+
 
 # --------------------------------------------------------------------------- #
 #  DDL                                                                         #
@@ -357,6 +360,21 @@ class SQLiteAdapter(DatabasePort):
                 params,
             ).fetchall()
         return [_row_to_article_enrichment(r) for r in rows]
+
+    def get_articles_by_ids(self, ids: list[str]) -> list[Article]:
+        """Return articles whose id matches any value in *ids* (preserves order)."""
+        if not ids:
+            return []
+        with self._engine.connect() as conn:
+            placeholders = ", ".join(f":id{i}" for i in range(len(ids)))
+            params = {f"id{i}": v for i, v in enumerate(ids)}
+            rows = conn.execute(
+                text(f"SELECT * FROM articles WHERE id IN ({placeholders})"),
+                params,
+            ).fetchall()
+        # Re-order to match caller's id order where possible.
+        by_id = {r[0]: _row_to_article(r) for r in rows}
+        return [by_id[i] for i in ids if i in by_id]
 
 
 # --------------------------------------------------------------------------- #

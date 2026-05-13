@@ -125,7 +125,10 @@ class TestSQLiteAdapter:
         db.save_enrichment(e_false)
 
         # This article genuinely covers AI.
-        a_true = _article(url="https://example.com/ai", title="New AI governance framework proposed")
+        a_true = _article(
+            url="https://example.com/ai",
+            title="New AI governance framework proposed",
+        )
         db.save_article(a_true)
         e_true = _enrichment(a_true.id)
         e_true.topics = ["AI governance", "regulation", "technology policy"]
@@ -181,3 +184,33 @@ class TestSQLiteAdapter:
         adapter = SQLiteAdapter(url)
         adapter.migrate()
         assert not adapter.article_exists("x", "y")
+
+    def test_get_articles_by_ids_returns_matching(self, db):
+        a1 = _article(url="https://example.com/ids1", title="IDs test one")
+        a2 = _article(url="https://example.com/ids2", title="IDs test two")
+        db.save_article(a1)
+        db.save_article(a2)
+        results = db.get_articles_by_ids([a1.id, a2.id])
+        ids = [r.id for r in results]
+        assert a1.id in ids
+        assert a2.id in ids
+
+    def test_get_articles_by_ids_preserves_order(self, db):
+        a1 = _article(url="https://example.com/order1", title="Order one")
+        a2 = _article(url="https://example.com/order2", title="Order two")
+        db.save_article(a1)
+        db.save_article(a2)
+        results = db.get_articles_by_ids([a2.id, a1.id])
+        assert results[0].id == a2.id
+        assert results[1].id == a1.id
+
+    def test_get_articles_by_ids_unknown_ids_omitted(self, db):
+        a = _article(url="https://example.com/known", title="Known article")
+        db.save_article(a)
+        results = db.get_articles_by_ids([a.id, "nonexistent-id-xyz"])
+        assert len(results) == 1
+        assert results[0].id == a.id
+
+    def test_get_articles_by_ids_empty_list(self, db):
+        results = db.get_articles_by_ids([])
+        assert results == []

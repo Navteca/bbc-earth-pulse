@@ -49,22 +49,23 @@ async def main() -> None:
 
     scheduler = APSchedulerAdapter()
 
-    # Ingestion job
+    # Ingestion job — respect BBC unofficial 30-min floor.
+    # If unofficial source is enabled and configured poll < floor, raise to floor.
     poll_minutes = settings.ingestion.poll_interval_minutes
+    effective_minutes = poll_minutes
+    if settings.sources.bbc_unofficial.enabled:
+        effective_minutes = max(poll_minutes, BBC_UNOFFICIAL_MIN_MINUTES)
+        if effective_minutes != poll_minutes:
+            logger.info(
+                "worker.unofficial.floor",
+                configured=poll_minutes,
+                effective=effective_minutes,
+            )
 
     async def run_ingestion() -> None:
         await pipeline.run()
 
-    scheduler.add_job(run_ingestion, interval_minutes=poll_minutes, job_id="ingestion")
-
-    # BBC unofficial has a minimum floor of 30 minutes
-    unofficial_minutes = max(poll_minutes, BBC_UNOFFICIAL_MIN_MINUTES)
-    if settings.sources.bbc_unofficial.enabled and unofficial_minutes != poll_minutes:
-        logger.info(
-            "worker.unofficial.floor",
-            configured=poll_minutes,
-            effective=unofficial_minutes,
-        )
+    scheduler.add_job(run_ingestion, interval_minutes=effective_minutes, job_id="ingestion")
 
     # Enrichment job — runs every 5 minutes to process newly ingested articles
     async def run_enrichment() -> None:
@@ -73,7 +74,7 @@ async def main() -> None:
     scheduler.add_job(run_enrichment, interval_minutes=5, job_id="enrichment")
 
     scheduler.start()
-    logger.info("worker.started", poll_minutes=poll_minutes)
+    logger.info("worker.started", poll_minutes=effective_minutes)
 
     # Run initial cycle immediately
     await run_ingestion()

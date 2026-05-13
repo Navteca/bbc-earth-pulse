@@ -9,8 +9,9 @@ from __future__ import annotations
 
 import copy
 import json
+import time
 from collections.abc import Callable
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 
 from mcp.server.fastmcp import FastMCP
 from mcp.server.transport_security import TransportSecuritySettings
@@ -21,6 +22,10 @@ from starlette.responses import JSONResponse
 from earth_pulse.config import Settings
 from earth_pulse.db import DatabasePort
 from earth_pulse.temporal import SynthesisEngine, compute_analytics
+
+# Token bucket parameters (OWASP LLM10 — unbounded consumption)
+_RATE_LIMIT_RPS = 1.0          # refill rate: 1 token per second = 60 req/min
+_RATE_LIMIT_BURST = 10         # max burst capacity
 
 
 def create_app(
@@ -55,6 +60,7 @@ def create_app(
 
     # Wrap with auth middleware: guard /mcp paths, pass /health through freely.
     api_key = settings.server.api_key
+    starlette_app.add_middleware(_TokenBucketRateLimiter)  # type: ignore[arg-type]
     starlette_app.add_middleware(_AuthMiddleware, api_key=api_key)  # type: ignore[arg-type]
 
     return starlette_app
@@ -81,6 +87,48 @@ class _AuthMiddleware(BaseHTTPMiddleware):
                 return JSONResponse(
                     status_code=401,
                     content={"error": "Invalid API key"},
+                )
+        return await call_next(request)
+
+
+class _TokenBucketRateLimiter(BaseHTTPMiddleware):
+    """Token bucket rate limiter on /mcp paths (OWASP LLM10).
+
+    Refills at _RATE_LIMIT_RPS tokens/second up to _RATE_LIMIT_BURST.
+    Returns 429 with Retry-After when the bucket is empty.
+    Keyed per API key (single bucket in MVP — one key).
+    """
+
+    def __init__(self, app: Callable) -> None:
+        super().__init__(app)
+        # bucket state: {api_key: (tokens, last_refill_time)}
+        self._buckets: dict[str, tuple[float, float]] = {}
+
+    def _consume(self, key: str) -> float | None:
+        """Consume one token. Returns None on success, or retry_after seconds on failure."""
+        now = time.monotonic()
+        tokens, last = self._buckets.get(key, (_RATE_LIMIT_BURST, now))
+        # Refill
+        elapsed = now - last
+        tokens = min(_RATE_LIMIT_BURST, tokens + elapsed * _RATE_LIMIT_RPS)
+        if tokens < 1.0:
+            retry_after = (1.0 - tokens) / _RATE_LIMIT_RPS
+            self._buckets[key] = (tokens, now)
+            return retry_after
+        self._buckets[key] = (tokens - 1.0, now)
+        return None
+
+    async def dispatch(self, request: Request, call_next: Callable) -> JSONResponse:
+        path = request.url.path.rstrip("/")
+        if path == "/mcp" or path.startswith("/mcp/"):
+            auth = request.headers.get("Authorization", "")
+            key = auth.removeprefix("Bearer ").strip() or "__anonymous__"
+            retry_after = self._consume(key)
+            if retry_after is not None:
+                return JSONResponse(
+                    status_code=429,
+                    content={"error": "Rate limit exceeded"},
+                    headers={"Retry-After": str(int(retry_after) + 1)},
                 )
         return await call_next(request)
 
@@ -332,5 +380,116 @@ def _register_tools(mcp: FastMCP, db: DatabasePort, synthesis: SynthesisEngine) 
             "sources": source_ids,
             "generated_at": now.isoformat(),
             "period_hours": period_hours,
+        })
+
+    @mcp.tool(
+        description=(
+            "Resolves a list of article IDs to their source metadata (title and URL). "
+            "Use this tool when you have article IDs from a previous tool response and want "
+            "to retrieve the original source articles for citation, verification, or display. "
+            "ids: list of article ID strings as returned in the 'sources' field of any tool. "
+            "Unknown or invalid IDs are silently omitted from the response."
+        )
+    )
+    async def get_sources(ids: list[str]) -> str:
+        articles = db.get_articles_by_ids(ids)
+        return json.dumps([
+            {"id": a.id, "title": a.title, "url": a.url}
+            for a in articles
+        ])
+
+    @mcp.tool(
+        description=(
+            "Compares the emotional and geopolitical mood of a region (or the world) "
+            "between two time windows — 'now' versus a baseline period in the past. "
+            "Use this tool for questions like: "
+            "'Is the world more anxious than it was last week?', "
+            "'Has European optimism changed since last month?', "
+            "'Is Middle East conflict escalating or de-escalating compared to 7 days ago?', "
+            "'How has global mood shifted over the past fortnight?'. "
+            "region: one of Africa, Asia, Europe, Latin America, Middle East, "
+            "North America, Oceania, Global — or null for worldwide. "
+            "hours: size of each comparison window in hours (default 24). "
+            "compare_days_ago: how many days back to place the baseline window (default 7)."
+        )
+    )
+    async def query_mood_diff(
+        region: str | None = None,
+        hours: int = 24,
+        compare_days_ago: int = 7,
+    ) -> str:
+        now = datetime.now(tz=UTC)
+        baseline_offset = timedelta(days=compare_days_ago)
+
+        # "Now" window: articles from the last `hours` hours.
+        pairs_now = db.get_enriched_articles(region=region, hours=hours)
+
+        # "Then" window: articles published within the same `hours`-hour span
+        # but anchored `compare_days_ago` days in the past.
+        # We fetch a wider window then filter manually so we can reuse the existing DB method.
+        then_end = now - baseline_offset
+        then_start = then_end - timedelta(hours=hours)
+        pairs_raw_then = db.get_enriched_articles(
+            region=region,
+            hours=int((now - then_start).total_seconds() // 3600) + 1,
+        )
+        pairs_then = [
+            (a, e)
+            for a, e in pairs_raw_then
+            if then_start <= a.published_at <= then_end
+        ]
+
+        analytics_now = compute_analytics(pairs_now, period_hours=hours)
+        analytics_then = compute_analytics(pairs_then, period_hours=hours)
+
+        emotion_now = _emotion_summary(pairs_now)
+        emotion_then = _emotion_summary(pairs_then)
+
+        scope = region or "humanity globally"
+        instruction = (
+            f"Compare the emotional and geopolitical mood of {scope} between two periods:\n"
+            f"- NOW: the last {hours} hours\n"
+            f"- THEN: the same {hours}-hour window {compare_days_ago} days ago\n\n"
+            "Use <analytics_now> and <analytics_then> to ground your comparison.\n"
+            f"NOW emotional scores: {emotion_now}\n"
+            f"THEN emotional scores: {emotion_then}\n\n"
+            "Describe: what has changed, what has intensified, what has faded. "
+            "Name the dominant shift — is the mood darker, lighter, more conflicted, "
+            "more hopeful? What narratives emerged or disappeared? "
+            "Be specific about direction and magnitude of change."
+        )
+
+        # Synthesise with now-window articles as the primary corpus.
+        # Inject both analytics blocks by building a combined XML context.
+        now_xml = (
+            analytics_now.to_xml_block()
+            .replace("<analytics>", "<analytics_now>")
+            .replace("</analytics>", "</analytics_now>")
+        )
+        then_xml = (
+            analytics_then.to_xml_block()
+            .replace("<analytics>", "<analytics_then>")
+            .replace("</analytics>", "</analytics_then>")
+        )
+        combined_analytics_xml = now_xml + "\n" + then_xml
+
+        # Use a minimal analytics placeholder so synthesis doesn't double-inject;
+        # we pass the combined XML as a pre-built override via a thin wrapper.
+        class _CombinedAnalytics:
+            def to_xml_block(self) -> str:
+                return combined_analytics_xml
+
+        synthesis_text, source_ids = await synthesis.synthesize(
+            pairs_now + pairs_then,
+            instruction,
+            hours=hours,
+            analytics=_CombinedAnalytics(),  # type: ignore[arg-type]
+        )
+        return json.dumps({
+            "synthesis": synthesis_text,
+            "sources": source_ids,
+            "generated_at": now.isoformat(),
+            "period_hours": hours,
+            "compare_days_ago": compare_days_ago,
         })
 

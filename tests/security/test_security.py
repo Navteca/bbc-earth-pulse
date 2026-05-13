@@ -221,3 +221,43 @@ class TestMalformedGPTResponses:
         }
         with pytest.raises(ValueError):
             _validate_enrichment_response(bad)
+
+
+class TestRateLimiting:
+    def test_rate_limit_exceeded_returns_429(self):
+        """Exhausting the burst cap returns 429 with Retry-After header."""
+        from earth_pulse.server import _RATE_LIMIT_BURST
+
+        app = _make_app(api_key="correct-key")
+        with TestClient(app, raise_server_exceptions=False) as client:
+            headers = {"Authorization": "Bearer correct-key"}
+            # Drain the burst bucket
+            responses = [
+                client.post("/mcp", headers=headers, json={}) for _ in range(_RATE_LIMIT_BURST + 5)
+            ]
+        status_codes = [r.status_code for r in responses]
+        assert 429 in status_codes
+
+    def test_rate_limit_response_has_retry_after(self):
+        """429 responses include a Retry-After header."""
+        from earth_pulse.server import _RATE_LIMIT_BURST
+
+        app = _make_app(api_key="correct-key")
+        with TestClient(app, raise_server_exceptions=False) as client:
+            headers = {"Authorization": "Bearer correct-key"}
+            responses = [
+                client.post("/mcp", headers=headers, json={}) for _ in range(_RATE_LIMIT_BURST + 5)
+            ]
+        throttled = [r for r in responses if r.status_code == 429]
+        assert len(throttled) > 0
+        assert all("retry-after" in r.headers for r in throttled)
+
+    def test_health_endpoint_not_rate_limited(self):
+        """Health check bypasses rate limiting entirely."""
+        from earth_pulse.server import _RATE_LIMIT_BURST
+
+        app = _make_app(api_key="correct-key")
+        with TestClient(app, raise_server_exceptions=False) as client:
+            # Make many health requests — none should be rate limited
+            responses = [client.get("/health") for _ in range(_RATE_LIMIT_BURST + 10)]
+        assert all(r.status_code == 200 for r in responses)

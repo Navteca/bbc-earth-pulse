@@ -142,3 +142,72 @@ class TestMain:
 
             await main()
         # No error = pass; we just need to cover the log line
+
+
+class TestUnofficialFloorEnforcement:
+    def _run_main_with_settings(self, settings):
+        import asyncio
+        from unittest.mock import AsyncMock, MagicMock, patch
+
+        async def fake_pipeline_run():
+            return {}
+
+        async def fake_enrichment_run():
+            return 0
+
+        mock_pipeline = MagicMock()
+        mock_pipeline.run = AsyncMock(side_effect=fake_pipeline_run)
+        mock_enrichment = MagicMock()
+        mock_enrichment.run_batch = AsyncMock(side_effect=fake_enrichment_run)
+        mock_scheduler = MagicMock()
+
+        class FakeEvent:
+            async def wait(self):
+                raise KeyboardInterrupt
+
+        with (
+            patch("earth_pulse.worker.load_settings", return_value=settings),
+            patch("earth_pulse.worker.SQLiteAdapter") as mock_db_cls,
+            patch("earth_pulse.worker.AsyncOpenAI"),
+            patch("earth_pulse.worker.IngestionPipeline", return_value=mock_pipeline),
+            patch("earth_pulse.worker.EnrichmentWorker", return_value=mock_enrichment),
+            patch("earth_pulse.worker.APSchedulerAdapter", return_value=mock_scheduler),
+            patch("asyncio.Event", FakeEvent),
+        ):
+            mock_db_cls.return_value.migrate = MagicMock()
+            from earth_pulse.worker import main
+            asyncio.run(main())
+        return mock_scheduler
+
+    def test_floor_enforced_in_scheduler(self):
+        """When poll=5 and unofficial enabled, scheduler.add_job called with 30, not 5."""
+        settings = _make_settings(poll=5, unofficial=True)
+        mock_scheduler = self._run_main_with_settings(settings)
+        ingestion_call = next(
+            c for c in mock_scheduler.add_job.call_args_list
+            if c.kwargs.get("job_id") == "ingestion"
+            or (c.args and c.args[1] == 30 if len(c.args) > 1 else False)
+            or c.kwargs.get("interval_minutes") == 30
+        )
+        # The interval_minutes kwarg must be 30 (the floor), not 5
+        assert ingestion_call.kwargs["interval_minutes"] == 30
+
+    def test_floor_not_applied_when_unofficial_disabled(self):
+        """When unofficial is disabled, scheduler uses configured poll interval."""
+        settings = _make_settings(poll=5, unofficial=False)
+        mock_scheduler = self._run_main_with_settings(settings)
+        ingestion_call = next(
+            c for c in mock_scheduler.add_job.call_args_list
+            if c.kwargs.get("job_id") == "ingestion"
+        )
+        assert ingestion_call.kwargs["interval_minutes"] == 5
+
+    def test_no_floor_needed_when_poll_already_above_floor(self):
+        """When poll=60 and unofficial enabled, floor is irrelevant — uses 60."""
+        settings = _make_settings(poll=60, unofficial=True)
+        mock_scheduler = self._run_main_with_settings(settings)
+        ingestion_call = next(
+            c for c in mock_scheduler.add_job.call_args_list
+            if c.kwargs.get("job_id") == "ingestion"
+        )
+        assert ingestion_call.kwargs["interval_minutes"] == 60

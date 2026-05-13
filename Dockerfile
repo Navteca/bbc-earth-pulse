@@ -2,14 +2,12 @@ FROM python:3.12-slim
 
 WORKDIR /app
 
-# Install uv via pip (avoids ghcr.io which may be unreachable in some environments)
-RUN pip install --no-cache-dir uv
+# Copy pre-exported requirements (generated via: uv export --no-dev --no-hashes -o requirements.txt)
+# Using pip instead of uv avoids QEMU segfaults when building for non-native architectures
+COPY requirements.txt ./
 
-# Copy dependency files first for layer caching
-COPY pyproject.toml uv.lock ./
-
-# Install production dependencies only into the project venv
-RUN uv sync --frozen --no-dev
+# Install production dependencies into the system Python (no venv needed in container)
+RUN pip install --no-cache-dir -r requirements.txt
 
 # Copy source
 COPY earth_pulse/ ./earth_pulse/
@@ -21,5 +19,4 @@ USER appuser
 
 EXPOSE 8000
 
-# Use the venv Python directly — avoids uv re-syncing dev deps at runtime
-ENV PATH="/app/.venv/bin:$PATH"
+CMD ["python", "-m", "earth_pulse.server_entry"]

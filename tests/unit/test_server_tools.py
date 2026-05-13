@@ -228,3 +228,76 @@ class TestSchemaTransform:
         prop = {"anyOf": [{"type": "string"}]}
         _transform_property(prop)
         assert prop["type"] == "string"
+
+
+class TestGetSourcesTool:
+    async def test_returns_matching_articles(self):
+        db = SQLiteAdapter("sqlite:///:memory:")
+        db.migrate()
+        _populate_db(db, n=2)
+        pairs = db.get_enriched_articles(hours=24)
+        ids = [a.id for a, _ in pairs]
+        mcp = _make_mcp(db, _make_synthesis())
+        result = await mcp.call_tool("get_sources", {"ids": ids})
+        data = json.loads(result[0][0].text)
+        assert isinstance(data, list)
+        assert len(data) == 2
+        assert all("id" in item and "title" in item and "url" in item for item in data)
+
+    async def test_unknown_ids_omitted(self):
+        db = SQLiteAdapter("sqlite:///:memory:")
+        db.migrate()
+        _populate_db(db, n=1)
+        pairs = db.get_enriched_articles(hours=24)
+        real_id = pairs[0][0].id
+        mcp = _make_mcp(db, _make_synthesis())
+        result = await mcp.call_tool("get_sources", {"ids": [real_id, "fake-id-xyz"]})
+        data = json.loads(result[0][0].text)
+        assert len(data) == 1
+        assert data[0]["id"] == real_id
+
+    async def test_empty_ids_returns_empty_list(self):
+        db = SQLiteAdapter("sqlite:///:memory:")
+        db.migrate()
+        mcp = _make_mcp(db, _make_synthesis())
+        result = await mcp.call_tool("get_sources", {"ids": []})
+        data = json.loads(result[0][0].text)
+        assert data == []
+
+
+class TestQueryMoodDiffTool:
+    async def test_returns_expected_fields(self):
+        db = SQLiteAdapter("sqlite:///:memory:")
+        db.migrate()
+        _populate_db(db, n=3)
+        mcp = _make_mcp(db, _make_synthesis("Mood has shifted."))
+        result = await mcp.call_tool(
+            "query_mood_diff", {"region": None, "hours": 48, "compare_days_ago": 7}
+        )
+        data = json.loads(result[0][0].text)
+        assert "synthesis" in data
+        assert "sources" in data
+        assert "generated_at" in data
+        assert data["period_hours"] == 48
+        assert data["compare_days_ago"] == 7
+
+    async def test_defaults(self):
+        db = SQLiteAdapter("sqlite:///:memory:")
+        db.migrate()
+        _populate_db(db, n=2)
+        mcp = _make_mcp(db, _make_synthesis("Default diff."))
+        result = await mcp.call_tool("query_mood_diff", {})
+        data = json.loads(result[0][0].text)
+        assert data["period_hours"] == 24
+        assert data["compare_days_ago"] == 7
+
+    async def test_regional_diff(self):
+        db = SQLiteAdapter("sqlite:///:memory:")
+        db.migrate()
+        _populate_db(db, n=2)
+        mcp = _make_mcp(db, _make_synthesis("Europe diff."))
+        result = await mcp.call_tool(
+            "query_mood_diff", {"region": "Europe", "hours": 24, "compare_days_ago": 3}
+        )
+        data = json.loads(result[0][0].text)
+        assert "synthesis" in data

@@ -2,7 +2,7 @@
 Pure FastMCP / Starlette server — no FastAPI.
 MCP endpoint: POST /mcp  (HTTP Streamable, stateless)
 Health check:  GET  /health
-Auth: Authorization: Bearer <key> required on /mcp paths.
+Auth: disabled — all /mcp paths are open.
 """
 
 from __future__ import annotations
@@ -31,13 +31,7 @@ _RATE_LIMIT_BURST = 10         # max burst capacity
 def create_app(
     settings: Settings, db: DatabasePort, synthesis: SynthesisEngine
 ) -> object:
-    """Return a Starlette ASGI app (via FastMCP) with auth middleware and health route."""
-    if not settings.server.api_key:
-        raise ValueError(
-            "server.api_key is required. "
-            "Set it in config.toml or SERVER__API_KEY env var."
-        )
-
+    """Return a Starlette ASGI app (via FastMCP) with health route. No auth."""
     # FastMCP owns /mcp natively — stateless_http=True means no initialize handshake
     # required; every POST to /mcp is self-contained.
     # DNS rebinding protection disabled — we sit behind Cloudflare Tunnel (Host mismatch).
@@ -58,37 +52,10 @@ def create_app(
     # Build the raw Starlette app — no FastAPI layer.
     starlette_app = mcp.streamable_http_app()
 
-    # Wrap with auth middleware: guard /mcp paths, pass /health through freely.
-    api_key = settings.server.api_key
+    # Rate limiter only — no auth middleware.
     starlette_app.add_middleware(_TokenBucketRateLimiter)  # type: ignore[arg-type]
-    starlette_app.add_middleware(_AuthMiddleware, api_key=api_key)  # type: ignore[arg-type]
 
     return starlette_app
-
-
-class _AuthMiddleware(BaseHTTPMiddleware):
-    """Require Bearer token on /mcp paths; pass everything else through."""
-
-    def __init__(self, app: Callable, api_key: str) -> None:
-        super().__init__(app)
-        self._api_key = api_key
-
-    async def dispatch(self, request: Request, call_next: Callable) -> JSONResponse:
-        path = request.url.path.rstrip("/")
-        if path == "/mcp" or path.startswith("/mcp/"):
-            auth = request.headers.get("Authorization", "")
-            if not auth.startswith("Bearer "):
-                return JSONResponse(
-                    status_code=401,
-                    content={"error": "Missing or invalid Authorization header"},
-                )
-            token = auth.removeprefix("Bearer ").strip()
-            if token != self._api_key:
-                return JSONResponse(
-                    status_code=401,
-                    content={"error": "Invalid API key"},
-                )
-        return await call_next(request)
 
 
 class _TokenBucketRateLimiter(BaseHTTPMiddleware):
@@ -96,7 +63,7 @@ class _TokenBucketRateLimiter(BaseHTTPMiddleware):
 
     Refills at _RATE_LIMIT_RPS tokens/second up to _RATE_LIMIT_BURST.
     Returns 429 with Retry-After when the bucket is empty.
-    Keyed per API key (single bucket in MVP — one key).
+    Keyed per client IP (no auth — anonymous traffic).
     """
 
     def __init__(self, app: Callable) -> None:
@@ -121,8 +88,8 @@ class _TokenBucketRateLimiter(BaseHTTPMiddleware):
     async def dispatch(self, request: Request, call_next: Callable) -> JSONResponse:
         path = request.url.path.rstrip("/")
         if path == "/mcp" or path.startswith("/mcp/"):
-            auth = request.headers.get("Authorization", "")
-            key = auth.removeprefix("Bearer ").strip() or "__anonymous__"
+            client = request.client
+            key = client.host if client else "__unknown__"
             retry_after = self._consume(key)
             if retry_after is not None:
                 return JSONResponse(

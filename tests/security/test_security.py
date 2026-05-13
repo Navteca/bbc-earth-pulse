@@ -1,4 +1,4 @@
-"""Security tests: prompt injection, malformed GPT, missing API key, rate limiting."""
+"""Security tests: prompt injection, malformed GPT, rate limiting. No auth tests — auth is disabled on this branch."""
 
 from __future__ import annotations
 
@@ -26,10 +26,10 @@ from earth_pulse.server import create_app
 from earth_pulse.temporal.synthesis import SynthesisEngine
 
 
-def _make_settings(api_key: str = "secure-key") -> Settings:
+def _make_settings() -> Settings:
     return Settings(
         openai=OpenAISettings(api_key="sk-test", chat_model="gpt-test"),
-        server=ServerSettings(api_key=api_key),
+        server=ServerSettings(api_key=""),
         ingestion=IngestionSettings(poll_interval_minutes=15),
         database=DatabaseSettings(url="sqlite:///:memory:"),
         sources=SourcesSettings(
@@ -39,8 +39,8 @@ def _make_settings(api_key: str = "secure-key") -> Settings:
     )
 
 
-def _make_app(api_key: str = "secure-key"):
-    settings = _make_settings(api_key)
+def _make_app():
+    settings = _make_settings()
     db = SQLiteAdapter("sqlite:///:memory:")
     db.migrate()
     mock_client = MagicMock()
@@ -48,46 +48,20 @@ def _make_app(api_key: str = "secure-key"):
     return create_app(settings, db, synthesis)
 
 
-class TestMCPAuthSecurity:
-    def test_create_app_fails_without_server_key(self):
-        settings = _make_settings(api_key="")
-        db = SQLiteAdapter("sqlite:///:memory:")
-        db.migrate()
-        mock_client = MagicMock()
-        synthesis = SynthesisEngine(mock_client, "gpt-test")
-        with pytest.raises(ValueError, match="server.api_key"):
-            create_app(settings, db, synthesis)
-
-    def test_missing_auth_returns_401(self):
+class TestMCPOpenAccess:
+    def test_mcp_accessible_without_auth_header(self):
         app = _make_app()
         with TestClient(app) as client:
+            # /mcp requires POST with a valid MCP payload — a bare GET returns
+            # a non-401 response (405 or MCP-level error), proving auth is gone.
             response = client.get("/mcp")
-            assert response.status_code == 401
+            assert response.status_code != 401
 
-    def test_wrong_api_key_returns_401(self):
-        app = _make_app(api_key="correct-key")
+    def test_health_endpoint_accessible(self):
+        app = _make_app()
         with TestClient(app) as client:
-            response = client.get("/mcp", headers={"Authorization": "Bearer wrong-key"})
-            assert response.status_code == 401
-
-    def test_correct_api_key_passes_auth(self):
-        app = _make_app(api_key="correct-key")
-        with TestClient(app) as client:
-            # Health endpoint requires no auth
             response = client.get("/health")
             assert response.status_code == 200
-
-    def test_non_bearer_scheme_returns_401(self):
-        app = _make_app(api_key="correct-key")
-        with TestClient(app) as client:
-            response = client.get("/mcp", headers={"Authorization": "Basic correct-key"})
-            assert response.status_code == 401
-
-    def test_empty_bearer_token_returns_401(self):
-        app = _make_app(api_key="correct-key")
-        with TestClient(app) as client:
-            response = client.get("/mcp", headers={"Authorization": "Bearer "})
-            assert response.status_code == 401
 
 
 class TestPromptInjectionMitigation:
@@ -228,12 +202,11 @@ class TestRateLimiting:
         """Exhausting the burst cap returns 429 with Retry-After header."""
         from earth_pulse.server import _RATE_LIMIT_BURST
 
-        app = _make_app(api_key="correct-key")
+        app = _make_app()
         with TestClient(app, raise_server_exceptions=False) as client:
-            headers = {"Authorization": "Bearer correct-key"}
-            # Drain the burst bucket
+            # Drain the burst bucket — no auth header needed
             responses = [
-                client.post("/mcp", headers=headers, json={}) for _ in range(_RATE_LIMIT_BURST + 5)
+                client.post("/mcp", json={}) for _ in range(_RATE_LIMIT_BURST + 5)
             ]
         status_codes = [r.status_code for r in responses]
         assert 429 in status_codes
@@ -242,11 +215,10 @@ class TestRateLimiting:
         """429 responses include a Retry-After header."""
         from earth_pulse.server import _RATE_LIMIT_BURST
 
-        app = _make_app(api_key="correct-key")
+        app = _make_app()
         with TestClient(app, raise_server_exceptions=False) as client:
-            headers = {"Authorization": "Bearer correct-key"}
             responses = [
-                client.post("/mcp", headers=headers, json={}) for _ in range(_RATE_LIMIT_BURST + 5)
+                client.post("/mcp", json={}) for _ in range(_RATE_LIMIT_BURST + 5)
             ]
         throttled = [r for r in responses if r.status_code == 429]
         assert len(throttled) > 0
@@ -256,8 +228,7 @@ class TestRateLimiting:
         """Health check bypasses rate limiting entirely."""
         from earth_pulse.server import _RATE_LIMIT_BURST
 
-        app = _make_app(api_key="correct-key")
+        app = _make_app()
         with TestClient(app, raise_server_exceptions=False) as client:
-            # Make many health requests — none should be rate limited
             responses = [client.get("/health") for _ in range(_RATE_LIMIT_BURST + 10)]
         assert all(r.status_code == 200 for r in responses)
